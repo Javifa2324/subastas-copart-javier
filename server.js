@@ -94,7 +94,9 @@ app.get('/api/vehiculos/:id', async (req, res) => {
     const v = (await p.request().input('id', sql.Int, id).query(`${vehicleSelect} WHERE v.Id=@id`)).recordset[0];
     if (!v) throw bad('Vehículo no encontrado.', 404);
     const fotos = (await p.request().input('id', sql.Int, id).query('SELECT Url FROM dbo.Copart_Javier_Fotos WHERE VehiculoId=@id ORDER BY Orden')).recordset.map(f => f.Url);
-    res.json({ ...publicVehicle(v, optionalUser(req)), fotos });
+    const userId = optionalUser(req);
+    const heOfertado = userId ? !!(await p.request().input('id',sql.Int,id).input('user',sql.Int,userId).query('SELECT TOP 1 1 AS Existe FROM dbo.Copart_Javier_Pujas WHERE VehiculoId=@id AND UsuarioId=@user')).recordset[0] : false;
+    res.json({ ...publicVehicle(v, userId), heOfertado, fotos });
   } catch (e) { failure(res, e); }
 });
 
@@ -162,7 +164,7 @@ app.post('/api/vehiculos/:id/pujas', auth, async (req,res) => {
     if (monto < min) throw bad(`La oferta mínima es Q ${min.toFixed(2)}.`,409);
     await new sql.Request(t).input('id',sql.Int,id).input('user',sql.Int,req.user.id).input('monto',sql.Decimal(18,2),monto).query('INSERT INTO dbo.Copart_Javier_Pujas(VehiculoId,UsuarioId,Monto) VALUES(@id,@user,@monto)');
     await t.commit(); t=null;
-    io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto, ganadorId:req.user.id });
+  io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto });
     io.emit('catalogo:actualizado'); res.status(201).json({ monto });
   } catch (e) { if (t) await t.rollback().catch(()=>{}); failure(res,e); }
 });
