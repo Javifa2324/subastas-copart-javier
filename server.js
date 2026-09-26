@@ -74,7 +74,7 @@ function publicVehicle(v, userId) {
   const now = Date.now(), start = new Date(v.Inicio).getTime(), end = new Date(v.Fin).getTime();
   const estado = now < start ? 'próxima' : now >= end ? (Number(v.OfertaActual) >= Number(v.PrecioBase) ? 'vendida' : 'desierta') : 'activa';
   const { GanadorId, ...safe } = v;
-  return { ...safe, estado, soyGanador: !!userId && userId === GanadorId, ofertaMinima: v.OfertaActual ? Math.ceil(Number(v.OfertaActual) * 1.1 * 100) / 100 : Number(v.PrecioBase) };
+  return { ...safe, estado, soyGanador: !!userId && userId === GanadorId, ofertaMinima: v.OfertaActual ? Math.floor((Math.round(Number(v.OfertaActual) * 100) * 11 + 9) / 10) / 100 : Number(v.PrecioBase) };
 }
 function optionalUser(req) { try { return jwt.verify(/^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1], secret).id; } catch { return null; } }
 
@@ -94,7 +94,9 @@ app.get('/api/vehiculos/:id', async (req, res) => {
     const v = (await p.request().input('id', sql.Int, id).query(`${vehicleSelect} WHERE v.Id=@id`)).recordset[0];
     if (!v) throw bad('Vehículo no encontrado.', 404);
     const fotos = (await p.request().input('id', sql.Int, id).query('SELECT Url FROM dbo.Copart_Javier_Fotos WHERE VehiculoId=@id ORDER BY Orden')).recordset.map(f => f.Url);
-    res.json({ ...publicVehicle(v, optionalUser(req)), fotos });
+    const userId = optionalUser(req);
+    const heOfertado = userId ? !!(await p.request().input('id',sql.Int,id).input('user',sql.Int,userId).query('SELECT TOP 1 1 AS Existe FROM dbo.Copart_Javier_Pujas WHERE VehiculoId=@id AND UsuarioId=@user')).recordset[0] : false;
+    res.json({ ...publicVehicle(v, userId), heOfertado, fotos });
   } catch (e) { failure(res, e); }
 });
 
@@ -150,7 +152,7 @@ app.post('/api/vehiculos/:id/pujas', auth, async (req,res) => {
   let t;
   try {
     const id = Number(req.params.id), monto = Number(req.body.monto);
-    if (!Number.isInteger(id) || !Number.isFinite(monto) || monto <= 0 || Math.round(monto*100) !== monto*100) throw bad('Monto inválido.');
+    if (!Number.isInteger(id) || !Number.isFinite(monto) || monto <= 0 || Math.abs(Math.round(monto*100) - monto*100) > 0.000001) throw bad('Monto inválido.');
     t = new sql.Transaction(await getPool()); await t.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
     const v = (await new sql.Request(t).input('id',sql.Int,id).query('SELECT VendedorId,PrecioBase,Inicio,Fin FROM dbo.Copart_Javier_Vehiculos WITH (UPDLOCK,HOLDLOCK) WHERE Id=@id')).recordset[0];
     if (!v) throw bad('Vehículo no encontrado.',404);
@@ -158,11 +160,11 @@ app.post('/api/vehiculos/:id/pujas', auth, async (req,res) => {
     const now = Date.now();
     if (now < new Date(v.Inicio).getTime() || now >= new Date(v.Fin).getTime()) throw bad('La subasta no está abierta.',409);
     const top = (await new sql.Request(t).input('id',sql.Int,id).query('SELECT MAX(Monto) AS Monto FROM dbo.Copart_Javier_Pujas WHERE VehiculoId=@id')).recordset[0].Monto;
-    const min = top === null ? Number(v.PrecioBase) : Math.ceil(Number(top)*110)/100;
+    const min = top === null ? Number(v.PrecioBase) : Math.floor((Math.round(Number(top)*100)*11+9)/10)/100;
     if (monto < min) throw bad(`La oferta mínima es Q ${min.toFixed(2)}.`,409);
     await new sql.Request(t).input('id',sql.Int,id).input('user',sql.Int,req.user.id).input('monto',sql.Decimal(18,2),monto).query('INSERT INTO dbo.Copart_Javier_Pujas(VehiculoId,UsuarioId,Monto) VALUES(@id,@user,@monto)');
     await t.commit(); t=null;
-    io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto, ganadorId:req.user.id });
+  io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto });
     io.emit('catalogo:actualizado'); res.status(201).json({ monto });
   } catch (e) { if (t) await t.rollback().catch(()=>{}); failure(res,e); }
 });
@@ -188,15 +190,44 @@ async function seedDemo(p) {
     if (!found) await p.request().input('n',sql.NVarChar(100),`Demo ${i}`).input('a',sql.NVarChar(100),'Subastas').input('c',sql.NVarChar(180),correo).input('t',sql.NVarChar(30),'55550000').input('h',sql.NVarChar(255),await bcrypt.hash(`DemoCopart2026!${i}`,11)).query('INSERT dbo.Copart_Javier_Usuarios(Nombre,Apellido,Correo,Telefono,ClaveHash) VALUES(@n,@a,@c,@t,@h)');
   }
   const demo=(await p.request().query("SELECT Id FROM dbo.Copart_Javier_Usuarios WHERE Correo='demo1@copart.test'")).recordset[0];
-  const count=(await p.request().input('id',sql.Int,demo.Id).query('SELECT COUNT(*) AS N FROM dbo.Copart_Javier_Vehiculos WHERE VendedorId=@id')).recordset[0].N;
-  if (count) return;
+  // Fotografías del mismo modelo y año para cada anuncio de demostración.
+  const photoFiles = {
+    'Toyota Corolla': [
+      '2020 Toyota Corolla LE standard front, 5.25.19.jpg',
+      '2020 Toyota Corolla LE standard rear, 5.25.19.jpg',
+      '2020 Toyota Corolla LE sedan.jpg',
+      '2020 Toyota Corolla LE (NA-market) front 4.29.19.jpg',
+      '2020 Toyota Corolla LE (NA-market) rear 4.29.19.jpg'
+    ],
+    'Honda CR-V': [2,3,8,19,28].map(n=>`2019 Honda CR-V 1.5 TC 2WD (${n}).jpg`),
+    'Ford Mustang': [
+      '2018 Ford Mustang GT 5.0 Front.jpg',
+      '2018 Ford Mustang GT 5.0.jpg',
+      '2018 Ford Mustang GT V8 5.0 facelift Front.jpg',
+      '2018 Ford Mustang GT 5.0 Rear (1).jpg',
+      '2018 Ford Mustang GT V8 5.0 facelift Interior.jpg'
+    ]
+  };
+  const photoUrls = key=>photoFiles[key].map(file=>`https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file)}?width=1200`);
+  async function saveDemoPhotos(id, urls) {
+    await p.request().input('id',sql.Int,id).query('DELETE FROM dbo.Copart_Javier_Fotos WHERE VehiculoId=@id');
+    for (let j=0;j<urls.length;j++) await p.request().input('id',sql.Int,id).input('url',sql.NVarChar(1000),urls[j]).input('orden',sql.Int,j).query('INSERT dbo.Copart_Javier_Fotos(VehiculoId,Url,Orden) VALUES(@id,@url,@orden)');
+  }
+  const existing=(await p.request().input('id',sql.Int,demo.Id).query(`SELECT v.Id,v.Marca,v.Modelo,f.Url AS PrimeraFoto FROM dbo.Copart_Javier_Vehiculos v OUTER APPLY (SELECT TOP 1 Url FROM dbo.Copart_Javier_Fotos WHERE VehiculoId=v.Id ORDER BY Orden) f WHERE v.VendedorId=@id`)).recordset;
+  if (existing.length) {
+    // Migrar únicamente las fotos genéricas antiguas; respetar ediciones posteriores.
+    for (const vehicle of existing) {
+      const key=`${vehicle.Marca} ${vehicle.Modelo}`;
+      if (photoFiles[key] && vehicle.PrimeraFoto?.includes('images.unsplash.com/')) await saveDemoPhotos(vehicle.Id,photoUrls(key));
+    }
+    return;
+  }
   const now=Date.now();
-  const samples=[['Toyota','Corolla',2020,'Sedán','Verde',25000,0],['Honda','CR-V',2019,'SUV','Amarillo',38000,1],['Ford','Mustang',2018,'Coupé','Rojo',55000,2]];
-  const ids=['photo-1549317661-bd32c8ce0db2','photo-1552519507-da3b142c6e3d','photo-1503376780353-7e6692767b70','photo-1507136566006-cfc505b114fc','photo-1494976388531-d1058494cdd8'];
-  for (const [marca,modelo,anio,tipo,danio,precio,n] of samples) {
-    const b={anio,tipo,marca,modelo,motor:'2.0 L',transmision:'Automática',combustible:'Gasolina',traccion:'FWD',cilindros:4,danio,precioBase:precio,inicio:new Date(now-3600000).toISOString(),fin:new Date(now+(n+2)*86400000).toISOString()};
+  const samples=[['Toyota','Corolla',2020,'Sedán','Verde',25000,'1.8 L',4,'FWD',2],['Honda','CR-V',2019,'SUV','Amarillo',38000,'1.5 L',4,'FWD',3],['Ford','Mustang',2018,'Coupé','Rojo',55000,'5.0 L',8,'RWD',4]];
+  for (const [marca,modelo,anio,tipo,danio,precio,motor,cilindros,traccion,dias] of samples) {
+    const b={anio,tipo,marca,modelo,motor,transmision:'Automática',combustible:'Gasolina',traccion,cilindros,danio,precioBase:precio,inicio:new Date(now-3600000).toISOString(),fin:new Date(now+dias*86400000).toISOString()};
     const r=await fillVehicle(p.request(),b).input('user',sql.Int,demo.Id).query(`INSERT dbo.Copart_Javier_Vehiculos(VendedorId,${columns}) OUTPUT INSERTED.Id VALUES(@user,${params})`);
-    for(let j=0;j<5;j++) await p.request().input('id',sql.Int,r.recordset[0].Id).input('url',sql.NVarChar(1000),`https://images.unsplash.com/${ids[(j+n)%ids.length]}?w=1200&q=80`).input('orden',sql.Int,j).query('INSERT dbo.Copart_Javier_Fotos(VehiculoId,Url,Orden) VALUES(@id,@url,@orden)');
+    await saveDemoPhotos(r.recordset[0].Id,photoUrls(`${marca} ${modelo}`));
   }
 }
 start().catch(e=>{ console.error('No se pudo iniciar la base de datos:',e); process.exit(1); });
