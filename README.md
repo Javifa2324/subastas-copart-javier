@@ -1,8 +1,8 @@
 # Copart — subastas de vehículos en tiempo real
 
-Sitio publicado: https://subastas-copart-javier.onrender.com/
+Sitio publicado: **agregar enlace de Render aquí al desplegar**.
 
-Aplicación Node.js, Express, SQL Server y Socket.IO. Frontend SPA sin compilación: catálogo, filtros, registro/login, publicaciones, búsqueda de mis publicaciones para editar y ofertas en vivo. Las pujas se serializan en SQL Server para impedir ofertas simultáneas contradictorias. La identidad de quien oferta no se envía al público ni por Socket.IO.
+Aplicación Node.js, Express, SQL Server y Socket.IO. Frontend SPA sin compilación: catálogo, filtros, registro/login, publicaciones y ofertas en vivo. Las pujas se serializan en SQL Server para impedir ofertas simultáneas contradictorias. La identidad de quien oferta no se envía al público.
 
 ## Ejecutar
 

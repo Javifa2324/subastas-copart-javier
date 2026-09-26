@@ -74,7 +74,7 @@ function publicVehicle(v, userId) {
   const now = Date.now(), start = new Date(v.Inicio).getTime(), end = new Date(v.Fin).getTime();
   const estado = now < start ? 'próxima' : now >= end ? (Number(v.OfertaActual) >= Number(v.PrecioBase) ? 'vendida' : 'desierta') : 'activa';
   const { GanadorId, ...safe } = v;
-  return { ...safe, estado, soyGanador: !!userId && userId === GanadorId, ofertaMinima: v.OfertaActual ? Math.floor((Math.round(Number(v.OfertaActual) * 100) * 11 + 9) / 10) / 100 : Number(v.PrecioBase) };
+  return { ...safe, estado, soyGanador: !!userId && userId === GanadorId, ofertaMinima: v.OfertaActual ? Math.ceil(Number(v.OfertaActual) * 1.1 * 100) / 100 : Number(v.PrecioBase) };
 }
 function optionalUser(req) { try { return jwt.verify(/^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1], secret).id; } catch { return null; } }
 
@@ -94,9 +94,7 @@ app.get('/api/vehiculos/:id', async (req, res) => {
     const v = (await p.request().input('id', sql.Int, id).query(`${vehicleSelect} WHERE v.Id=@id`)).recordset[0];
     if (!v) throw bad('Vehículo no encontrado.', 404);
     const fotos = (await p.request().input('id', sql.Int, id).query('SELECT Url FROM dbo.Copart_Javier_Fotos WHERE VehiculoId=@id ORDER BY Orden')).recordset.map(f => f.Url);
-    const userId = optionalUser(req);
-    const heOfertado = userId ? !!(await p.request().input('id',sql.Int,id).input('user',sql.Int,userId).query('SELECT TOP 1 1 AS Existe FROM dbo.Copart_Javier_Pujas WHERE VehiculoId=@id AND UsuarioId=@user')).recordset[0] : false;
-    res.json({ ...publicVehicle(v, userId), heOfertado, fotos });
+    res.json({ ...publicVehicle(v, optionalUser(req)), fotos });
   } catch (e) { failure(res, e); }
 });
 
@@ -152,7 +150,7 @@ app.post('/api/vehiculos/:id/pujas', auth, async (req,res) => {
   let t;
   try {
     const id = Number(req.params.id), monto = Number(req.body.monto);
-    if (!Number.isInteger(id) || !Number.isFinite(monto) || monto <= 0 || Math.abs(Math.round(monto*100) - monto*100) > 0.000001) throw bad('Monto inválido.');
+    if (!Number.isInteger(id) || !Number.isFinite(monto) || monto <= 0 || Math.round(monto*100) !== monto*100) throw bad('Monto inválido.');
     t = new sql.Transaction(await getPool()); await t.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
     const v = (await new sql.Request(t).input('id',sql.Int,id).query('SELECT VendedorId,PrecioBase,Inicio,Fin FROM dbo.Copart_Javier_Vehiculos WITH (UPDLOCK,HOLDLOCK) WHERE Id=@id')).recordset[0];
     if (!v) throw bad('Vehículo no encontrado.',404);
@@ -160,11 +158,11 @@ app.post('/api/vehiculos/:id/pujas', auth, async (req,res) => {
     const now = Date.now();
     if (now < new Date(v.Inicio).getTime() || now >= new Date(v.Fin).getTime()) throw bad('La subasta no está abierta.',409);
     const top = (await new sql.Request(t).input('id',sql.Int,id).query('SELECT MAX(Monto) AS Monto FROM dbo.Copart_Javier_Pujas WHERE VehiculoId=@id')).recordset[0].Monto;
-    const min = top === null ? Number(v.PrecioBase) : Math.floor((Math.round(Number(top)*100)*11+9)/10)/100;
+    const min = top === null ? Number(v.PrecioBase) : Math.ceil(Number(top)*110)/100;
     if (monto < min) throw bad(`La oferta mínima es Q ${min.toFixed(2)}.`,409);
     await new sql.Request(t).input('id',sql.Int,id).input('user',sql.Int,req.user.id).input('monto',sql.Decimal(18,2),monto).query('INSERT INTO dbo.Copart_Javier_Pujas(VehiculoId,UsuarioId,Monto) VALUES(@id,@user,@monto)');
     await t.commit(); t=null;
-  io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto });
+    io.to(`vehiculo:${id}`).emit('puja:actualizada',{ id, monto, ganadorId:req.user.id });
     io.emit('catalogo:actualizado'); res.status(201).json({ monto });
   } catch (e) { if (t) await t.rollback().catch(()=>{}); failure(res,e); }
 });
